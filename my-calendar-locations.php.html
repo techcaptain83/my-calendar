@@ -1,0 +1,1484 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Source: my-calendar-locations.php - My Calendar Hook Doumentation</title>
+
+    <script src="scripts/prettify/prettify.js"> </script>
+    <script src="scripts/prettify/lang-css.js"> </script>
+    <link type="text/css" rel="stylesheet" href="styles/prettify-tomorrow.css">
+    <link type="text/css" rel="stylesheet" href="styles/jsdoc-default.css">
+    <link type="text/css" rel="stylesheet" href="styles-docs.css?v=0.1.1">
+</head>
+
+<body>
+
+<div id="main">
+
+    <header><h1 class="page-title">Source: my-calendar-locations.php</h1></header>
+	<main>
+    
+
+
+
+    
+    <section>
+        <article>
+            <pre class="prettyprint source linenums"><code>&lt;?php
+/**
+ * Update &amp; Add Locations
+ *
+ * @category Locations
+ * @package  My Calendar
+ * @author   Joe Dolson
+ * @license  GPLv2 or later
+ * @link     https://www.joedolson.com/my-calendar/
+ */
+
+if ( ! defined( 'ABSPATH' ) ) {
+	exit;
+}
+
+/**
+ * Handle updating location posts
+ *
+ * @param array $where Array with where query.
+ * @param array $data saved location data.
+ * @param array $post POST data.
+ *
+ * @return int post ID
+ */
+function mc_update_location_post( $where, $data, $post ) {
+	// if the location save was successful.
+	$location_id = $where['location_id'];
+	$post_id     = mc_get_location_post( $location_id, false );
+	// If, after all that, the post doesn't exist, create it.
+	if ( ! get_post_status( $post_id ) ) {
+		$post['update'] = 'true';
+		$post_id        = mc_create_location_post( $location_id, $data, $post );
+	}
+	$title       = $data['location_label'];
+	$post_status = 'publish';
+	$auth        = get_current_user_id();
+	$type        = 'mc-locations';
+	$my_post     = array(
+		'ID'          => $post_id,
+		'post_title'  => $title,
+		'post_status' => $post_status,
+		'post_author' => $auth,
+		'post_name'   => sanitize_title( $title ),
+		'post_type'   => $type,
+	);
+	if ( mc_switch_sites() &amp;&amp; defined( BLOG_ID_CURRENT_SITE ) ) {
+		switch_to_blog( BLOG_ID_CURRENT_SITE );
+	}
+	$post_id = wp_update_post( $my_post );
+
+	/**
+	 * Executed an action when a location post is updated.
+	 *
+	 * @hook mc_update_location_posts
+	 *
+	 * @param {int}   $post_id Post ID.
+	 * @param {array} $post POST Array of data sent to create post.
+	 * @param {array} $data Data for this location.
+	 * @param {int}   $location_id Location ID.
+	 */
+	do_action( 'mc_update_location_post', $post_id, $_POST, $data, $location_id );
+	if ( mc_switch_sites() ) {
+		restore_current_blog();
+	}
+
+	return $post_id;
+}
+add_action( 'mc_modify_location', 'mc_update_location_post', 10, 3 );
+
+/**
+ * Create a post for My Calendar location data on save
+ *
+ * @param bool|int $location_id Result of save action; location ID or false.
+ * @param array    $data Saved event data.
+ * @param array    $post POST data.
+ *
+ * @return int|false newly created post ID or false if error.
+ */
+function mc_create_location_post( $location_id, $data, $post = array() ) {
+	if ( ! $location_id ) {
+		return false;
+	}
+	$post_id = mc_get_location_post( $location_id, false );
+	// If not post ID or the post ID has no status.
+	if ( ! $post_id || ! get_post_status( $post_id ) ) {
+		$title       = $data['location_label'];
+		$post_status = 'publish';
+		$auth        = get_current_user_id();
+		$type        = 'mc-locations';
+		$my_post     = array(
+			'post_title'  => $title,
+			'post_status' => $post_status,
+			'post_author' => $auth,
+			'post_name'   => sanitize_title( $title ),
+			'post_date'   => current_time( 'Y-m-d H:i:s' ),
+			'post_type'   => $type,
+		);
+		$post_id     = wp_insert_post( $my_post );
+		if ( isset( $post['update'] ) ) {
+			mc_update_location_post_relationship( $location_id, $post_id );
+		} else {
+			mc_transition_location( $location_id, $post_id );
+		}
+
+		/**
+		 * Executed an action when a location post is created.
+		 *
+		 * @hook mc_create_location_posts
+		 *
+		 * @param {int}   $post_id Post ID.
+		 * @param {array} $post POST Array of data sent to create post.
+		 * @param {array} $data Data for this location.
+		 * @param {int}   $location_id Location ID.
+		 */
+		do_action( 'mc_create_location_post', $post_id, $post, $data, $location_id );
+		wp_publish_post( $post_id );
+	}
+
+	return $post_id;
+}
+add_action( 'mc_save_location', 'mc_create_location_post', 10, 3 );
+
+/**
+ * Update custom fields for a location.
+ *
+ * @param int   $post_id Post ID associated with location.
+ * @param array $post POST data.
+ * @param array $data Saved location data.
+ * @param int   $location_id Location ID in table.
+ *
+ * @return array Errors.
+ */
+function mc_update_location_custom_fields( $post_id, $post, $data, $location_id ) {
+	$fields       = mc_location_fields();
+	$field_errors = array();
+	foreach ( $fields as $name => $field ) {
+		if ( isset( $post[ $name ] ) ) {
+			if ( ! isset( $field['sanitize_callback'] ) || ( isset( $field['sanitize_callback'] ) &amp;&amp; ! function_exists( $field['sanitize_callback'] ) ) ) {
+				// if no sanitization is provided, we'll prep it for SQL and strip tags.
+				$sanitized = sanitize_text_field( strip_tags( urldecode( $post[ $name ] ) ) );
+			} else {
+				$sanitized = call_user_func( $field['sanitize_callback'], urldecode( $post[ $name ] ) );
+			}
+			$success = update_post_meta( $post_id, $name, $sanitized );
+			if ( ! $success ) {
+				$field_errors[] = $name;
+			}
+		}
+	}
+
+	return $field_errors;
+}
+add_action( 'mc_update_location_post', 'mc_update_location_custom_fields', 10, 4 );
+
+/**
+ * Delete custom post type associated with event
+ *
+ * @param int $result   Result of delete action.
+ * @param int $location_id Location ID.
+ */
+function mc_location_delete_post( $result, $location_id ) {
+	global $wpdb;
+	$post = mc_get_location_post( $location_id, false );
+	if ( $post ) {
+		wp_delete_post( $post, true );
+		// Delete post relationship.
+		$wpdb->query( $wpdb->prepare( 'DELETE FROM ' . my_calendar_location_relationships_table() . ' 	WHERE post_id = %d', $post ) ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+		/**
+		 * Executed an action when a location's post is deleted.
+		 *
+		 * @hook mc_delete_location_posts
+		 *
+		 * @param {int} $location_id Location deleted.
+		 * @param {int} $post Post ID.
+		 */
+		do_action( 'mc_delete_location_posts', $location_id, $post );
+	}
+}
+add_action( 'mc_delete_location', 'mc_location_delete_post', 10, 2 );
+
+/**
+ * Get the location post for a location.
+ *
+ * @param int  $location_id Location ID.
+ * @param bool $type True for full post object.
+ *
+ * @return object|int|false WP_Post, post ID, or false if not found.
+ */
+function mc_get_location_post( $location_id, $type = true ) {
+	$mcdb     = mc_is_remote_db();
+	$post_ids = $mcdb->get_results( $mcdb->prepare( 'SELECT post_id FROM ' . my_calendar_location_relationships_table() . ' WHERE location_id = %d', $location_id ) ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+	// If there are multiple records for this post, delete extras.
+	$post_id = false;
+	foreach ( $post_ids as $rid ) {
+		$id = $rid->post_id;
+		if ( ! 'mc-locations' === get_post_type( $id ) ) {
+			$mcdb->query( $mcdb->prepare( 'DELETE FROM ' . my_calendar_location_relationships_table() . ' WHERE post_id = %d', $id ) );
+		} else {
+			$post_id = $id;
+			break;
+		}
+	}
+	if ( ! $post_id ) {
+		// Copy location into relationships table.
+		$post_id = false;
+		$query   = $mcdb->prepare( "SELECT post_id FROM $mcdb->postmeta where meta_key ='_mc_location_id' and meta_value = %d", $location_id );
+		$posts   = $mcdb->get_col( $query ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+		if ( isset( $posts[0] ) ) {
+			$post_id = $posts[0];
+		}
+		mc_transition_location( $location_id, $post_id );
+	}
+
+	return ( $type ) ? get_post( $post_id ) : $post_id;
+}
+
+/**
+ * Get location ID from post.
+ *
+ * @param int $post_ID Post ID.
+ *
+ * @return int
+ */
+function mc_get_location_id( $post_ID ) {
+	$mcdb        = mc_is_remote_db();
+	$location_id = $mcdb->get_var( $mcdb->prepare( 'SELECT location_id FROM ' . my_calendar_location_relationships_table() . ' WHERE post_id = %d', $post_ID ) ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+	if ( ! $location_id ) {
+		// Migrate from previous method of storing location IDs.
+		$location_id = get_post_meta( $post_ID, '_mc_location_id', true );
+	}
+
+	return $location_id;
+}
+
+/**
+ * Update a single field in a location.
+ *
+ * @param string    $field field name.
+ * @param int|float $data data to update to.
+ * @param int       $location location ID.
+ *
+ * @return mixed boolean/int query result
+ */
+function mc_update_location( $field, $data, $location ) {
+	global $wpdb;
+	$field = sanitize_key( $field );
+	if ( 'location_latitude' === $field || 'location_longitude' === $field ) {
+		$result = $wpdb->query( $wpdb->prepare( 'UPDATE ' . my_calendar_locations_table() . " SET $field = %f WHERE location_id=%d", $data, $location ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared,WordPress.DB.PreparedSQL.NotPrepared
+	} else {
+		$result = $wpdb->query( $wpdb->prepare( 'UPDATE ' . my_calendar_locations_table() . " SET $field = %d WHERE location_id=%d", $data, $location ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared,WordPress.DB.PreparedSQL.NotPrepared
+	}
+
+	return $result;
+}
+
+/**
+ * Update a location relationship value.
+ *
+ * @param int $location_id Location ID from location table.
+ * @param int $location_post Post ID from posts table.
+ *
+ * @since 3.3.0
+ */
+function mc_update_location_post_relationship( $location_id, $location_post ) {
+	global $wpdb;
+	$location_relationship = $wpdb->get_var( $wpdb->prepare( 'SELECT relationship_id FROM ' . my_calendar_location_relationships_table() . ' WHERE location_id = %d', $location_id ) ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+	$where                 = array( 'relationship_id' => (int) $location_relationship );
+	if ( $location_relationship ) {
+		$update = $wpdb->update(
+			my_calendar_location_relationships_table(),
+			array(
+				'post_id' => $location_post,
+			),
+			$where,
+			array( '%d' ),
+			'%d'
+		);
+	} else {
+		$update = $wpdb->insert(
+			my_calendar_location_relationships_table(),
+			array(
+				'location_id'     => $location_id,
+				'post_id'         => $location_post,
+				'relationship_id' => $location_relationship,
+			),
+			array( '%d', '%d', '%d' )
+		);
+	}
+
+	return $update;
+}
+
+/**
+ * Insert a new location.
+ *
+ * @param array $add Array of location details to add.
+ *
+ * @return mixed boolean/int query result.
+ */
+function mc_insert_location( $add ) {
+	global $wpdb;
+	$add     = array_map( 'mc_kses_post', $add );
+	$formats = array( '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%f', '%f', '%d', '%s', '%s', '%s' );
+	$results = $wpdb->insert( my_calendar_locations_table(), $add, $formats );
+	if ( $results ) {
+		$insert_id = $wpdb->insert_id;
+	} else {
+		$insert_id = false;
+	}
+
+	return $insert_id;
+}
+
+/**
+ * Get count of locations.
+ *
+ * @return int
+ */
+function mc_count_locations() {
+	global $wpdb;
+	$count = $wpdb->get_var( 'SELECT COUNT(*) FROM ' . my_calendar_locations_table() ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared,WordPress.DB.PreparedSQL.NotPrepared
+
+	return $count;
+}
+
+/**
+ * Update a location.
+ *
+ * @param array $update Array of location details to modify.
+ * @param int   $where Location ID to update.
+ *
+ * @return mixed boolean/int query result.
+ */
+function mc_modify_location( $update, $where ) {
+	global $wpdb;
+	$update  = array_map( 'mc_kses_post', $update );
+	$formats = array( '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%f', '%f', '%d', '%s', '%s', '%s' );
+	$results = $wpdb->update( my_calendar_locations_table(), $update, $where, $formats, '%d' );
+
+	return $results;
+}
+
+/**
+ * Delete a single location.
+ *
+ * @param int    $location Location ID.
+ * @param string $type Return type.
+ *
+ * @return string
+ */
+function mc_delete_location( $location, $type = 'string' ) {
+	global $wpdb;
+	$location = (int) ( ( isset( $_GET['location_id'] ) ) ? $_GET['location_id'] : $location );
+	$results  = $wpdb->query( $wpdb->prepare( 'DELETE FROM ' . my_calendar_locations_table() . ' WHERE location_id=%d', $location ) ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+	/**
+	 * Executed an action when a location is deleted.
+	 *
+	 * @hook mc_delete_location
+	 *
+	 * @param {int|false} $results Result of database deletion. False if error; number of rows affected if successful.
+	 * @param {int} $location Location ID.
+	 */
+	do_action( 'mc_delete_location', $results, $location );
+	if ( $results ) {
+		$value            = true;
+		$return           = mc_show_notice( __( 'Location deleted successfully', 'my-calendar' ), false );
+		$default_location = mc_get_option( 'default_location', false );
+		if ( (int) $default_location === $location ) {
+			mc_update_option( 'default_location', '' );
+		}
+	} else {
+		$value  = false;
+		$return = mc_show_error( __( 'Location could not be deleted', 'my-calendar' ), false );
+	}
+
+	return ( 'string' === $type ) ? $return : $value;
+}
+
+/**
+ * Handle results of form submit &amp; display form.
+ */
+function my_calendar_add_locations() {
+	global $wpdb;
+	?>
+	&lt;div class="wrap my-calendar-admin">
+	&lt;?php
+	my_calendar_check_db();
+	// We do some checking to see what we're doing.
+	mc_mass_delete_locations();
+	if ( ! empty( $_POST ) &amp;&amp; ( ! isset( $_POST['mc_locations'] ) &amp;&amp; ! isset( $_POST['mass_delete'] ) ) ) {
+		$nonce = $_REQUEST['_wpnonce'];
+		if ( ! wp_verify_nonce( $nonce, 'my-calendar-nonce' ) ) {
+			wp_die( 'My Calendar: Security check failed' );
+		}
+	}
+	if ( isset( $_POST['mode'] ) &amp;&amp; 'add' === $_POST['mode'] ) {
+		$add = array(
+			'location_label'     => $_POST['location_label'],
+			'location_street'    => $_POST['location_street'],
+			'location_street2'   => $_POST['location_street2'],
+			'location_city'      => $_POST['location_city'],
+			'location_state'     => $_POST['location_state'],
+			'location_postcode'  => $_POST['location_postcode'],
+			'location_region'    => $_POST['location_region'],
+			'location_country'   => $_POST['location_country'],
+			'location_url'       => $_POST['location_url'],
+			'location_longitude' => $_POST['location_longitude'],
+			'location_latitude'  => $_POST['location_latitude'],
+			'location_zoom'      => $_POST['location_zoom'],
+			'location_phone'     => $_POST['location_phone'],
+			'location_phone2'    => $_POST['location_phone2'],
+			'location_access'    => isset( $_POST['location_access'] ) ? serialize( $_POST['location_access'] ) : '',
+		);
+
+		$results = mc_insert_location( $add );
+		if ( isset( $_POST['mc_default_location'] ) ) {
+			mc_update_option( 'default_location', (int) $results );
+		}
+		/**
+		 * Executed an action when a location is saved.
+		 *
+		 * @hook mc_save_location
+		 *
+		 * @param {int|false} $results Result of database insertion. Row ID or false.
+		 * @param {array} $add Array of location parameters to add.
+		 * @param {array} $post POST array.
+		 */
+		do_action( 'mc_save_location', $results, $add, $_POST );
+		if ( $results ) {
+			mc_show_notice( __( 'Location added successfully', 'my-calendar' ) );
+		} else {
+			mc_show_error( __( 'Location could not be added to database', 'my-calendar' ) );
+		}
+	} elseif ( isset( $_GET['location_id'] ) &amp;&amp; 'delete' === $_GET['mode'] ) {
+		$loc = absint( $_GET['location_id'] );
+		echo mc_delete_location( $loc );
+	} elseif ( isset( $_GET['mode'] ) &amp;&amp; isset( $_GET['location_id'] ) &amp;&amp; 'edit' === $_GET['mode'] &amp;&amp; ! isset( $_POST['mode'] ) ) {
+		$cur_loc = (int) $_GET['location_id'];
+		mc_show_location_form( 'edit', $cur_loc );
+	} elseif ( isset( $_POST['location_id'] ) &amp;&amp; isset( $_POST['location_label'] ) &amp;&amp; 'edit' === $_POST['mode'] ) {
+		$update = array(
+			'location_label'     => $_POST['location_label'],
+			'location_street'    => $_POST['location_street'],
+			'location_street2'   => $_POST['location_street2'],
+			'location_city'      => $_POST['location_city'],
+			'location_state'     => $_POST['location_state'],
+			'location_postcode'  => $_POST['location_postcode'],
+			'location_region'    => $_POST['location_region'],
+			'location_country'   => $_POST['location_country'],
+			'location_url'       => $_POST['location_url'],
+			'location_longitude' => $_POST['location_longitude'],
+			'location_latitude'  => $_POST['location_latitude'],
+			'location_zoom'      => $_POST['location_zoom'],
+			'location_phone'     => $_POST['location_phone'],
+			'location_phone2'    => $_POST['location_phone2'],
+			'location_access'    => isset( $_POST['location_access'] ) ? serialize( $_POST['location_access'] ) : '',
+		);
+
+		$where = array( 'location_id' => (int) $_POST['location_id'] );
+		if ( isset( $_POST['mc_default_location'] ) ) {
+			mc_update_option( 'default_location', (int) $_POST['location_id'] );
+		}
+		$default_location = mc_get_option( 'default_location' );
+		if ( (int) $_POST['location_id'] === (int) $default_location &amp;&amp; ! isset( $_POST['mc_default_location'] ) ) {
+			mc_update_option( 'default_location', '' );
+		}
+		$results = mc_modify_location( $update, $where );
+
+		/**
+		 * Executed an action when a location is modified.
+		 *
+		 * @hook mc_modify_location
+		 *
+		 * @param {array} $where Array [location_id => $id].
+		 * @param {array} $update Array of location parameters to update.
+		 * @param {array} $post POST array.
+		 */
+		do_action( 'mc_modify_location', $where, $update, $_POST );
+		if ( false === $results ) {
+			mc_show_error( __( 'Location could not be edited.', 'my-calendar' ) );
+		} elseif ( 0 === $results ) {
+			mc_show_error( __( 'Location was not changed.', 'my-calendar' ) );
+		} else {
+			mc_show_notice( __( 'Location edited successfully', 'my-calendar' ) );
+		}
+		$cur_loc = (int) $_POST['location_id'];
+		mc_show_location_form( 'edit', $cur_loc );
+	}
+
+	if ( isset( $_GET['mode'] ) &amp;&amp; 'edit' !== $_GET['mode'] || isset( $_POST['mode'] ) &amp;&amp; 'edit' !== $_POST['mode'] || ! isset( $_GET['mode'] ) &amp;&amp; ! isset( $_POST['mode'] ) ) {
+		mc_show_location_form( 'add' );
+	}
+}
+
+/**
+ * Create location editing form.
+ *
+ * @param string    $view type of view add/edit.
+ * @param int|false $loc_id Location ID or false for new locations.
+ */
+function mc_show_location_form( $view = 'add', $loc_id = false ) {
+	$cur_loc = false;
+	if ( $loc_id ) {
+		$update_location = false;
+		if ( isset( $_POST['update_gps'] ) ) {
+			$update_location = 'force';
+		}
+		$cur_loc = mc_get_location( $loc_id, $update_location );
+	}
+	$has_data = ( is_object( $cur_loc ) ) ? true : false;
+	if ( 'add' === $view ) {
+		?>
+		&lt;h1>&lt;?php esc_html_e( 'Add New Location', 'my-calendar' ); ?>&lt;/h1>
+		&lt;?php
+	} else {
+		?>
+		&lt;h1 class="wp-heading-inline">&lt;?php esc_html_e( 'Edit Location', 'my-calendar' ); ?>&lt;/h1>
+		&lt;a href="&lt;?php echo admin_url( 'admin.php?page=my-calendar-locations' ); ?>" class="page-title-action">&lt;?php esc_html_e( 'Add New', 'my-calendar' ); ?>&lt;/a>
+		&lt;hr class="wp-header-end">
+		&lt;?php
+	}
+	?>
+	&lt;div class="postbox-container jcd-wide">
+		&lt;div class="metabox-holder">
+			&lt;div class="ui-sortable meta-box-sortables">
+				&lt;div class="postbox">
+					&lt;h2>&lt;?php esc_html_e( 'Location Editor', 'my-calendar' ); ?>&lt;/h2>
+
+					&lt;div class="inside location_form">
+					&lt;?php
+					$params = array();
+					if ( isset( $_GET['location_id'] ) ) {
+						$params = array(
+							'mode'        => sanitize_text_field( $_GET['mode'] ),
+							'location_id' => absint( $_GET['location_id'] ),
+						);
+					}
+					?>
+					&lt;form id="my-calendar" method="post" action="&lt;?php echo esc_url( add_query_arg( $params, admin_url( 'admin.php?page=my-calendar-locations' ) ) ); ?>">
+						&lt;div class="mc-controls">
+							&lt;ul>
+								&lt;?php
+								if ( 'edit' === $view ) {
+									$delete_url = add_query_arg( 'location_id', $loc_id, admin_url( 'admin.php?page=my-calendar-location-manager&amp;mode=delete' ) );
+									$view_url   = get_the_permalink( mc_get_location_post( $loc_id, false ) );
+									?>
+								&lt;li>&lt;span class="dashicons dashicons-no" aria-hidden="true">&lt;/span>&lt;a class="delete" href="&lt;?php echo esc_url( $delete_url ); ?>">&lt;?php esc_html_e( 'Delete', 'my-calendar' ); ?>&lt;/a>&lt;/li>
+									&lt;?php
+									if ( $view_url &amp;&amp; esc_url( $view_url ) ) {
+										?>
+								&lt;li>&lt;span class="dashicons dashicons-laptop" aria-hidden="true">&lt;/span>&lt;a class="view" href="&lt;?php echo esc_url( $view_url ); ?>">&lt;?php esc_html_e( 'View', 'my-calendar' ); ?>&lt;/a>&lt;/li>
+										&lt;?php
+									}
+								}
+								?>
+								&lt;li>&lt;input type="submit" name="save" class="button-primary" value="&lt;?php echo esc_attr( ( 'edit' === $view ) ? __( 'Save Changes', 'my-calendar' ) : __( 'Add Location', 'my-calendar' ) ); ?> "/>&lt;/li>
+							&lt;/ul>
+						&lt;/div>
+						&lt;div>&lt;input type="hidden" name="_wpnonce" value="&lt;?php echo wp_create_nonce( 'my-calendar-nonce' ); ?>"/>&lt;/div>
+							&lt;?php
+							if ( 'add' === $view ) {
+								?>
+								&lt;div>
+									&lt;input type="hidden" name="mode" value="add" />
+									&lt;input type="hidden" name="location_id" value="" />
+								&lt;/div>
+								&lt;?php
+							} else {
+								?>
+								&lt;div>
+									&lt;input type="hidden" name="mode" value="edit"/>
+									&lt;input type="hidden" name="location_id" value="&lt;?php echo $cur_loc->location_id; ?>"/>
+								&lt;/div>
+								&lt;?php
+							}
+							echo mc_locations_fields( $has_data, $cur_loc, 'location' );
+							?>
+							&lt;div class="mc-controls footer">
+								&lt;ul>
+									&lt;?php
+									if ( 'edit' === $view ) {
+										$delete_url = add_query_arg( 'location_id', $loc_id, admin_url( 'admin.php?page=my-calendar-location-manager&amp;mode=delete' ) );
+										$view_url   = get_the_permalink( mc_get_location_post( $loc_id, false ) );
+										?>
+									&lt;li>&lt;span class="dashicons dashicons-no" aria-hidden="true">&lt;/span>&lt;a class="delete" href="&lt;?php echo esc_url( $delete_url ); ?>">&lt;?php esc_html_e( 'Delete', 'my-calendar' ); ?>&lt;/a>&lt;/li>
+										&lt;?php
+										if ( $view_url &amp;&amp; esc_url( $view_url ) ) {
+											?>
+								&lt;li>&lt;span class="dashicons dashicons-laptop" aria-hidden="true">&lt;/span>&lt;a class="view" href="&lt;?php echo esc_url( $view_url ); ?>">&lt;?php esc_html_e( 'View', 'my-calendar' ); ?>&lt;/a>&lt;/li>
+											&lt;?php
+										}
+									}
+									?>
+									&lt;li>&lt;input type="submit" name="save" class="button-primary" value="&lt;?php echo esc_attr( ( 'edit' === $view ) ? __( 'Save Changes', 'my-calendar' ) : __( 'Add Location', 'my-calendar' ) ); ?> "/>&lt;/li>
+								&lt;/ul>
+							&lt;/div>
+						&lt;/form>
+					&lt;/div>
+				&lt;/div>
+			&lt;/div>
+			&lt;?php
+			if ( 'edit' === $view ) {
+				?>
+				&lt;p>
+					&lt;a href="&lt;?php echo admin_url( 'admin.php?page=my-calendar-locations' ); ?>">&lt;?php esc_html_e( 'Add a New Location', 'my-calendar' ); ?>&lt;/a>
+				&lt;/p>
+				&lt;?php
+			}
+			?>
+		&lt;/div>
+	&lt;/div>
+		&lt;?php
+		mc_show_sidebar( '' );
+		?>
+	&lt;/div>
+	&lt;?php
+}
+
+/**
+ * Get details about one location.
+ *
+ * @param int         $location_id Location ID.
+ * @param bool|string $update_location Whether to update location on fetch. 'Force' to force update.
+ *
+ * @return object|false location if found
+ */
+function mc_get_location( $location_id, $update_location = true ) {
+	$mcdb     = mc_is_remote_db();
+	$location = $mcdb->get_row( $mcdb->prepare( 'SELECT * FROM ' . my_calendar_locations_table() . ' WHERE location_id = %d', $location_id ) ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+	if ( is_object( $location ) ) {
+		$location->location_post = mc_get_location_post( $location_id, false );
+		$prevent_geolocation     = ( '1' === get_post_meta( $location->location_post, '_mc_geolocate_error', true ) &amp;&amp; 'force' !== $update_location ) ? true : false;
+		if ( $prevent_geolocation ) {
+			return $location;
+		}
+		if ( $update_location ) {
+			if ( mc_get_option( 'gmap_api_key' ) ) {
+				if ( 'force' === $update_location ) {
+					$latitude  = false;
+					$longitude = false;
+				} else {
+					$latitude  = ( '0.000000' === (string) $location->location_latitude ) ? false : true;
+					$longitude = ( '0.000000' === (string) $location->location_longitude ) ? false : true;
+				}
+				if ( ! $latitude || ! $longitude ) {
+					$loc = mc_get_location_coordinates( $location_id );
+					$lat = isset( $loc['latitude'] ) ? $loc['latitude'] : '';
+					$lng = isset( $loc['longitude'] ) ? $loc['longitude'] : '';
+
+					if ( $lat &amp;&amp; $lng ) {
+						mc_update_location( 'location_longitude', $lng, $location_id );
+						mc_update_location( 'location_latitude', $lat, $location_id );
+						$location->location_longitude = $lng;
+						$location->location_latitude  = $lat;
+					} else {
+						update_post_meta( $location->location_post, '_mc_geolocate_error', '1' );
+					}
+				}
+			}
+		}
+	}
+
+	return $location;
+}
+
+/**
+ * Check whether this location field has pre-entered controls on input
+ *
+ * @param string $this_field field name.
+ *
+ * @return boolean true if location field is controlled
+ */
+function mc_controlled_field( $this_field ) {
+	$this_field = trim( $this_field );
+	$controls   = mc_get_option( 'location_controls' );
+	if ( ! is_array( $controls ) || empty( $controls ) ) {
+		return false;
+	}
+	$controlled = array_keys( $controls );
+	if ( in_array( 'event_' . $this_field, $controlled, true ) &amp;&amp; ! empty( $controls[ 'event_' . $this_field ] ) ) {
+		return true;
+	} else {
+		return false;
+	}
+}
+
+/**
+ * Geolocate latitude and longitude of location.
+ *
+ * @param int|false $location_id Location ID.
+ * @param array     $address Array of address parameters.
+ *
+ * @return array
+ */
+function mc_get_location_coordinates( $location_id = false, $address = array() ) {
+	require_once( 'includes/class-geolocation.php' );
+	$street  = '';
+	$street2 = '';
+	$city    = '';
+	$zip     = '';
+	$country = '';
+
+	new Geolocation;
+	if ( $location_id ) {
+		$location = mc_get_location( $location_id, false );
+		$street   = $location->location_street;
+		$street2  = $location->location_street2;
+		$city     = $location->location_city;
+		$zip      = $location->location_postcode;
+		$country  = $location->location_country;
+	} elseif ( ! empty( $address ) ) {
+		$street  = ( isset( $address['street'] ) ) ? $address['street'] : '';
+		$street2 = ( isset( $address['street2'] ) ) ? $address['street2'] : '';
+		$city    = ( isset( $address['city'] ) ) ? $address['city'] : '';
+		$zip     = ( isset( $address['zip'] ) ) ? $address['zip'] : '';
+		$country = ( isset( $address['country'] ) ) ? $address['country'] : '';
+	}
+
+	$coordinates = Geolocation::get_coordinates( $street, $street2, $city, $zip, $country );
+
+	return $coordinates;
+}
+
+/**
+ * Return select element with the controlled values for a location field
+ *
+ * @param string $fieldname Name of field.
+ * @param string $selected currently selected value.
+ * @param string $context current context: entering new location or new event.
+ *
+ * @return string HTML select element with values
+ */
+function mc_location_controller( $fieldname, $selected, $context = 'location' ) {
+	$field    = ( 'location' === $context ) ? 'location_' . $fieldname : 'event_' . $fieldname;
+	$selected = trim( $selected );
+	$options  = mc_get_option( 'location_controls' );
+	$regions  = $options[ 'event_' . $fieldname ];
+	$form     = "&lt;select name='$field' id='e_$fieldname'>";
+	$form    .= "&lt;option value=''>" . __( 'Select', 'my-calendar' ) . '&lt;/option>';
+	if ( is_admin() &amp;&amp; '' !== $selected ) {
+		$form .= "&lt;option value='" . esc_attr( $selected ) . "'>" . esc_html( $selected ) . ' :' . __( '(Not a controlled value)', 'my-calendar' ) . '&lt;/option>';
+	}
+	foreach ( $regions as $key => $value ) {
+		$key       = trim( $key );
+		$value     = trim( $value );
+		$aselected = ( $selected === $key ) ? ' selected="selected"' : '';
+		$form     .= "&lt;option value='" . esc_attr( $key ) . "'$aselected>" . esc_html( $value ) . "&lt;/option>\n";
+	}
+	$form .= '&lt;/select>';
+
+	return $form;
+}
+
+/**
+ * Produce the form to submit location data
+ *
+ * @param boolean   $has_data Whether currently have data.
+ * @param object    $data event or location data.
+ * @param string    $context whether currently in an event or a location context.
+ * @param int|false $group_id Group ID if in group editing.
+ *
+ * @return string HTML form fields
+ */
+function mc_locations_fields( $has_data, $data, $context = 'location', $group_id = false ) {
+	$return = '&lt;div class="mc-locations" id="location-fields">';
+	if ( current_user_can( 'mc_edit_locations' ) &amp;&amp; 'event' === $context ) {
+		$checked = ' checked="checked"';
+		// Default unchecked if event has a location or is being copied.
+		if ( ( $has_data &amp;&amp; ! empty( $data->event_location ) ) || isset( $_GET['mode'] ) &amp;&amp; 'copy' === $_GET['mode'] ) {
+			$checked = '';
+		}
+		$return .= '&lt;p class="checkboxes">&lt;input type="checkbox" value="on" name="mc_copy_location" id="mc_copy_location"' . $checked . ' /> &lt;label for="mc_copy_location">' . __( 'Copy new location into the locations table', 'my-calendar' ) . '&lt;/label>&lt;/p>';
+	}
+	if ( current_user_can( 'mc_edit_settings' ) &amp;&amp; isset( $_GET['page'] ) &amp;&amp; 'my-calendar-locations' === $_GET['page'] ) {
+		$checked = ( isset( $_GET['location_id'] ) &amp;&amp; (int) mc_get_option( 'default_location' ) === (int) $_GET['location_id'] ) ? 'checked="checked"' : '';
+		$return .= '&lt;p class="checkbox">';
+		$return .= '&lt;input type="checkbox" name="mc_default_location" id="mc_default_location"' . $checked . ' /> &lt;label for="mc_default_location">' . __( 'Default Location', 'my-calendar' ) . '&lt;/label>';
+		$return .= '&lt;/p>';
+	}
+	$compare   = ( $group_id ) ? mc_compare_group_members( $group_id, 'event_label', false ) : '';
+	$return   .= '
+	&lt;p>
+	&lt;label for="e_label">' . __( 'Name of Location (required)', 'my-calendar' ) . $compare . '&lt;/label>';
+	$cur_label = ( is_object( $data ) ) ? ( stripslashes( $data->{$context . '_label'} ) ) : '';
+	if ( mc_controlled_field( 'label' ) ) {
+		$return .= mc_location_controller( 'label', $cur_label, $context );
+	} else {
+		$return .= '&lt;input type="text" id="e_label" name="' . $context . '_label" value="' . esc_attr( $cur_label ) . '" />';
+	}
+	$compare1        = ( $group_id ) ? mc_compare_group_members( $group_id, 'event_street', false ) : '';
+	$compare2        = ( $group_id ) ? mc_compare_group_members( $group_id, 'event_street2', false ) : '';
+	$compare         = ( $group_id ) ? mc_compare_group_members( $group_id, 'event_city', false ) : '';
+	$street_address  = ( $has_data ) ? stripslashes( $data->{$context . '_street'} ) : '';
+	$street_address2 = ( $has_data ) ? stripslashes( $data->{$context . '_street2'} ) : '';
+	$return         .= '
+	&lt;/p>
+	&lt;div class="locations-container columns">
+	&lt;div class="location-primary">
+	&lt;fieldset>
+	&lt;legend>' . __( 'Location Address', 'my-calendar' ) . '&lt;/legend>
+	&lt;p>
+		&lt;label for="e_street">' . __( 'Street Address', 'my-calendar' ) . $compare1 . '&lt;/label> &lt;input type="text" id="e_street" name="' . $context . '_street" value="' . esc_attr( $street_address ) . '" />
+	&lt;/p>
+	&lt;p>
+		&lt;label for="e_street2">' . __( 'Street Address (2)', 'my-calendar' ) . $compare2 . '&lt;/label> &lt;input type="text" id="e_street2" name="' . $context . '_street2" value="' . esc_attr( $street_address2 ) . '" />
+	&lt;/p>
+	&lt;p>
+		&lt;label for="e_city">' . __( 'City', 'my-calendar' ) . $compare . '&lt;/label> ';
+	$cur_city        = ( is_object( $data ) ) ? ( stripslashes( $data->{$context . '_city'} ) ) : '';
+	if ( mc_controlled_field( 'city' ) ) {
+		$return .= mc_location_controller( 'city', $cur_city, $context );
+	} else {
+		$return .= '&lt;input type="text" id="e_city" name="' . $context . '_city" value="' . esc_attr( $cur_city ) . '" />';
+	}
+	$return .= '&lt;/p>&lt;p>';
+
+	$compare   = ( $group_id ) ? mc_compare_group_members( $group_id, 'event_state', false ) : '';
+	$return   .= '&lt;label for="e_state">' . __( 'State/Province', 'my-calendar' ) . $compare . '&lt;/label> ';
+	$cur_state = ( is_object( $data ) ) ? ( stripslashes( $data->{$context . '_state'} ) ) : '';
+	if ( mc_controlled_field( 'state' ) ) {
+		$return .= mc_location_controller( 'state', $cur_state, $context );
+	} else {
+		$return .= '&lt;input type="text" id="e_state" name="' . $context . '_state" size="10" value="' . esc_attr( $cur_state ) . '" />';
+	}
+	$compare      = ( $group_id ) ? mc_compare_group_members( $group_id, 'event_postcode', false ) : '';
+	$return      .= '&lt;/p>&lt;p>&lt;label for="e_postcode">' . __( 'Postal Code', 'my-calendar' ) . $compare . '&lt;/label> ';
+	$cur_postcode = ( is_object( $data ) ) ? ( stripslashes( $data->{$context . '_postcode'} ) ) : '';
+	if ( mc_controlled_field( 'postcode' ) ) {
+		$return .= mc_location_controller( 'postcode', $cur_postcode, $context );
+	} else {
+		$return .= '&lt;input type="text" id="e_postcode" name="' . $context . '_postcode" value="' . esc_attr( $cur_postcode ) . '" />';
+	}
+	$compare    = ( $group_id ) ? mc_compare_group_members( $group_id, 'event_region', false ) : '';
+	$return    .= '&lt;/p>&lt;p>';
+	$return    .= '&lt;label for="e_region">' . __( 'Region', 'my-calendar' ) . $compare . '&lt;/label> ';
+	$cur_region = ( is_object( $data ) ) ? ( stripslashes( $data->{$context . '_region'} ) ) : '';
+	if ( mc_controlled_field( 'region' ) ) {
+		$return .= mc_location_controller( 'region', $cur_region, $context );
+	} else {
+		$return .= '&lt;input type="text" id="e_region" name="' . $context . '_region" value="' . esc_attr( $cur_region ) . '" />';
+	}
+	$compare     = ( $group_id ) ? mc_compare_group_members( $group_id, 'event_country', false ) : '';
+	$return     .= '&lt;/p>&lt;p>&lt;label for="e_country">' . __( 'Country', 'my-calendar' ) . $compare . '&lt;/label> ';
+	$cur_country = ( $has_data ) ? ( stripslashes( $data->{$context . '_country'} ) ) : '';
+	if ( mc_controlled_field( 'country' ) ) {
+		$return .= mc_location_controller( 'country', $cur_country, $context );
+	} else {
+		$return .= '&lt;input type="text" id="e_country" name="' . $context . '_country" size="10" value="' . esc_attr( $cur_country ) . '" />';
+	}
+
+	$compare_zoom   = ( $group_id ) ? mc_compare_group_members( $group_id, 'event_zoom', false ) : '';
+	$compare_phone  = ( $group_id ) ? mc_compare_group_members( $group_id, 'event_phone', false ) : '';
+	$compare_phone2 = ( $group_id ) ? mc_compare_group_members( $group_id, 'event_phone2', false ) : '';
+
+	$compare_url  = ( $group_id ) ? mc_compare_group_members( $group_id, 'event_url', false ) : '';
+	$compare_lat  = ( $group_id ) ? mc_compare_group_members( $group_id, 'event_latitude', false ) : '';
+	$compare_lon  = ( $group_id ) ? mc_compare_group_members( $group_id, 'event_longitude', false ) : '';
+	$zoom         = ( $has_data ) ? $data->{$context . '_zoom'} : '16';
+	$event_phone  = ( $has_data ) ? stripslashes( $data->{$context . '_phone'} ) : '';
+	$event_phone2 = ( $has_data ) ? stripslashes( $data->{$context . '_phone2'} ) : '';
+	$event_url    = ( $has_data ) ? stripslashes( $data->{$context . '_url'} ) : '';
+	$event_lat    = ( $has_data ) ? stripslashes( $data->{$context . '_latitude'} ) : '';
+	$event_lon    = ( $has_data ) ? stripslashes( $data->{$context . '_longitude'} ) : '';
+	$update_gps   = ( $has_data &amp;&amp; mc_get_option( 'gmap_api_key', '' ) &amp;&amp; 'location' === $context ) ? '&lt;p class="checkboxes">&lt;input type="checkbox" value="1" id="update_gps" name="update_gps" /> &lt;label for="update_gps">' . __( 'Update GPS Coordinates', 'my-calendar' ) . '&lt;/label>&lt;/p>' : '';
+	$return      .= '&lt;/p>
+	&lt;p>
+	&lt;label for="e_zoom">' . __( 'Initial Zoom', 'my-calendar' ) . $compare_zoom . '&lt;/label>
+		&lt;select name="' . $context . '_zoom" id="e_zoom">
+			&lt;option value="16"' . selected( $zoom, '16', false ) . '>' . __( 'Neighborhood', 'my-calendar' ) . '&lt;/option>
+			&lt;option value="14"' . selected( $zoom, '14', false ) . '>' . __( 'Small City', 'my-calendar' ) . '&lt;/option>
+			&lt;option value="12"' . selected( $zoom, '12', false ) . '>' . __( 'Large City', 'my-calendar' ) . '&lt;/option>
+			&lt;option value="10"' . selected( $zoom, '10', false ) . '>' . __( 'Greater Metro Area', 'my-calendar' ) . '&lt;/option>
+			&lt;option value="8"' . selected( $zoom, '8', false ) . '>' . __( 'State', 'my-calendar' ) . '&lt;/option>
+			&lt;option value="6"' . selected( $zoom, '6', false ) . '>' . __( 'Region', 'my-calendar' ) . '&lt;/option>
+		&lt;/select>
+	&lt;/p>
+	&lt;/fieldset>
+	&lt;fieldset>
+	&lt;legend>' . __( 'GPS Coordinates (optional)', 'my-calendar' ) . '&lt;/legend>
+	&lt;p>
+	' . __( 'Coordinates are used for placing the pin on your map when available.', 'my-calendar' ) . '
+	&lt;/p>
+	&lt;div class="columns-flex">
+	&lt;p>
+		&lt;label for="e_latitude">' . __( 'Latitude', 'my-calendar' ) . $compare_lat . '&lt;/label> &lt;input type="text" id="e_latitude" name="' . $context . '_latitude" size="10" value="' . esc_attr( $event_lat ) . '" />
+	&lt;/p>
+	&lt;p>
+		&lt;label for="e_longitude">' . __( 'Longitude', 'my-calendar' ) . $compare_lon . '&lt;/label> &lt;input type="text" id="e_longitude" name="' . $context . '_longitude" size="10" value="' . esc_attr( $event_lon ) . '" />
+	&lt;/p>' . $update_gps . '
+	&lt;/div>
+	&lt;/fieldset>';
+	/**
+	 * Append content in the primary column of location fields.
+	 *
+	 * @hook mc_location_container_primary
+	 *
+	 * @param {string} HTML content. Default empty string.
+	 * @param {object} $data Current display object.
+	 * @param {string} $context Location or event. Tells us the structure of the $data object.
+	 *
+	 * @return {string}
+	 */
+	$return .= apply_filters( 'mc_location_container_primary', '', $data, $context );
+	$return .= '
+	&lt;/div>
+	&lt;div class="location-secondary">
+	&lt;fieldset>
+	&lt;legend>' . __( 'Location Contact Information', 'my-calendar' ) . '&lt;/legend>
+	&lt;p>
+	&lt;label for="e_phone">' . __( 'Phone', 'my-calendar' ) . $compare_phone . '&lt;/label> &lt;input type="text" id="e_phone" name="' . $context . '_phone" value="' . esc_attr( $event_phone ) . '" />
+	&lt;/p>
+	&lt;p>
+	&lt;label for="e_phone2">' . __( 'Secondary Phone', 'my-calendar' ) . $compare_phone2 . '&lt;/label> &lt;input type="text" id="e_phone2" name="' . $context . '_phone2" value="' . esc_attr( $event_phone2 ) . '" />
+	&lt;/p>
+	&lt;p>
+	&lt;label for="e_url">' . __( 'Location URL', 'my-calendar' ) . $compare_url . '&lt;/label> &lt;input type="text" id="e_url" name="' . $context . '_url" value="' . esc_attr( $event_url ) . '" />
+	&lt;/p>
+	&lt;/fieldset>
+	&lt;fieldset>
+	&lt;legend>' . __( 'Location Accessibility', 'my-calendar' ) . '&lt;/legend>
+	&lt;ul class="accessibility-features checkboxes">';
+
+	/**
+	 * Filter venue accessibility array.
+	 *
+	 * @hook mc_venue_accessibility
+	 *
+	 * @param {array} $access Access parameters.
+	 * @param {object} $data Current data object.
+	 *
+	 * @return {array}
+	 */
+	$access      = apply_filters( 'mc_venue_accessibility', mc_location_access(), $data );
+	$access_list = '';
+	if ( $has_data ) {
+		if ( 'location' === $context ) {
+			$location_access = unserialize( $data->{$context . '_access'} );
+		} else {
+			if ( property_exists( $data, 'event_location' ) ) {
+				$event_location = $data->event_location;
+			} else {
+				$event_location = false;
+			}
+			$location_access = unserialize( mc_location_data( 'location_access', $event_location ) );
+		}
+	} else {
+		$location_access = array();
+	}
+	foreach ( $access as $k => $a ) {
+		$id      = "loc_access_$k";
+		$label   = $a;
+		$checked = '';
+		if ( is_array( $location_access ) ) {
+			$checked = ( in_array( $a, $location_access, true ) || in_array( $k, $location_access, true ) ) ? " checked='checked'" : '';
+		}
+		$item         = sprintf( '&lt;li>&lt;input type="checkbox" id="%1$s" name="' . $context . '_access[]" value="%4$s" class="checkbox" %2$s /> &lt;label for="%1$s">%3$s&lt;/label>&lt;/li>', esc_attr( $id ), $checked, esc_html( $label ), esc_attr( $a ) );
+		$access_list .= $item;
+	}
+	$return .= $access_list;
+	$return .= '&lt;/ul>
+	&lt;/fieldset>';
+	$fields  = mc_display_location_fields( mc_location_fields(), $data, $context );
+	$return .= ( '' !== $fields ) ? '&lt;div class="mc-custom-fields mc-locations">&lt;fieldset>&lt;legend>' . __( 'Custom Fields', 'my-calendar' ) . '&lt;/legend>' . $fields . '&lt;/fieldset>&lt;/div>' : '';
+	/**
+	 * Append content in the secondary column of location fields.
+	 *
+	 * @hook mc_location_container_secondary
+	 *
+	 * @param {string} HTML content. Default empty string.
+	 * @param {object} $data Current display object.
+	 * @param {string} $context Location or event. Tells us the structure of the $data object.
+	 *
+	 * @return {string}
+	 */
+	$return .= apply_filters( 'mc_location_container_secondary', '', $data, $context );
+	$return .= '&lt;/div>
+	&lt;/div>
+	&lt;/div>';
+
+	$api_key  = mc_get_option( 'gmap_api_key' );
+	$location = ( $has_data &amp;&amp; 'event' === $context ) ? $data->event_location : false;
+	if ( $api_key &amp;&amp; ! ( 'event' === $context &amp;&amp; false === (bool) $location ) ) {
+		$return .= '&lt;h3>' . __( 'Location Map', 'my-calendar' ) . '&lt;/h3>';
+		$map     = mc_generate_map( $data, $context );
+
+		$return .= ( '' === $map ) ? __( 'Not enough information to generate a map', 'my-calendar' ) : $map;
+	} else {
+		if ( ! $api_key ) {
+			// Translators: URL to settings page to add key.
+			$return .= sprintf( __( 'Add a &lt;a href="%s">Google Maps API Key&lt;/a> to generate a location map.', 'my-calendar' ), admin_url( 'admin.php?page=my-calendar-config#mc-output' ) );
+		}
+	}
+
+	return $return;
+}
+
+/**
+ * Return a set of location fields.
+ *
+ * @return array
+ */
+function mc_location_fields() {
+	/**
+	 * Return custom fields for use in My Calendar locations. Fields should format like:
+	 *
+	 * ```$fields['location_type']   = array(
+	 *    'title'             => 'Location Type',
+	 *    'sanitize_callback' => 'sanitize_text_field',
+	 *    'display_callback'  => 'esc_html',
+	 *    'input_type'        => 'select',
+	 *    'input_values'      => array( 'Virtual', 'Private Home', 'Concert Hall', 'Outdoor Venue' ),
+	 * );```
+	 *
+	 * @hook mc_location_fields
+	 *
+	 * @param {array} Array of custom fields.
+	 *
+	 * @return {array}
+	 */
+	$fields = apply_filters( 'mc_location_fields', array() );
+
+	return $fields;
+}
+
+/**
+ * Get custom data for a location.
+ *
+ * @param int|false    $location_id Location ID.
+ * @param int|false    $location_post Location Post ID.
+ * @param string|false $field Custom field name.
+ *
+ * @return mixed
+ */
+function mc_location_custom_data( $location_id = false, $location_post = false, $field = false ) {
+	if ( ! $field ) {
+		return;
+	}
+	$fields = mc_location_fields();
+	if ( $field &amp;&amp; ! in_array( $field, array_keys( $fields ), true ) ) {
+		return '';
+	}
+	$location_id = ( isset( $_GET['location_id'] ) ) ? (int) $_GET['location_id'] : $location_id;
+	$value       = '';
+	// Quick exit when location post is known.
+	if ( $location_post ) {
+		return get_post_meta( $location_post, $field, true );
+	}
+	if ( ! $location_id ) {
+		$location_id = ( isset( $_POST['location_id'] ) ) ? (int) $_POST['location_id'] : false;
+	}
+	if ( $location_id ) {
+		$post_id = mc_get_location_post( $location_id, false );
+		$value   = get_post_meta( $post_id, $field, true );
+	}
+
+	return $value;
+}
+
+/**
+ * Add custom fields to event data output.
+ *
+ * @param array  $e Event tag data.
+ * @param object $event Event object.
+ *
+ * @return array
+ */
+function mc_template_location_fields( $e, $event ) {
+	$fields = mc_location_fields();
+	foreach ( $fields as $name => $field ) {
+		$location_post = false;
+		if ( is_object( $event ) &amp;&amp; property_exists( $event, 'location' ) ) {
+			if ( is_object( $event->location ) &amp;&amp; property_exists( $event->location, 'location_post' ) ) {
+				$location_post = $event->location->location_post;
+			} else {
+				// If location data has no backing post, it cannot have custom fields.
+				return $e;
+			}
+		}
+		$value = mc_location_custom_data( $event->event_location, $location_post, $name );
+		if ( ! isset( $field['display_callback'] ) || ( isset( $field['display_callback'] ) &amp;&amp; ! function_exists( $field['display_callback'] ) ) ) {
+			// if no display callback is provided.
+			$display = stripslashes( $value );
+		} else {
+			$display = call_user_func( $field['display_callback'], $value, $field );
+		}
+		$key       = 'location_' . $name;
+		$e[ $key ] = $display;
+	}
+
+	return $e;
+}
+add_filter( 'mc_filter_shortcodes', 'mc_template_location_fields', 10, 2 );
+
+/**
+ * Expand custom fields from array to field output
+ *
+ * @param array  $fields Array of field data.
+ * @param object $data Location data.
+ * @param string $context Location or event.
+ *
+ * @return string
+ */
+function mc_display_location_fields( $fields, $data, $context ) {
+	if ( empty( $fields ) ) {
+		return '';
+	}
+	$output      = '';
+	$return      = '';
+	$location_id = false;
+	if ( is_object( $data ) &amp;&amp; 'event' === $context ) {
+		$location_id = $data->event_location;
+	}
+	if ( is_object( $data ) &amp;&amp; 'location' === $context ) {
+		$location_id = $data->location_id;
+	}
+	if ( ! $location_id ) {
+		return '';
+	}
+	/**
+	 * Filter available custom fields &amp; set display order.
+	 *
+	 * @hook mc_order_location_fields
+	 *
+	 * @param {array} $fields Array of custom fields data.
+	 * @param {string} $context Whether we're currently editing a location or an event.
+	 *
+	 * @return {array}
+	 */
+	$custom_fields = apply_filters( 'mc_order_location_fields', $fields, $context );
+	foreach ( $custom_fields as $name => $field ) {
+		$user_value = mc_location_custom_data( $location_id, false, $name );
+		$required   = isset( $field['required'] ) ? ' required' : '';
+		$req_label  = isset( $field['required'] ) ? ' &lt;span class="required">' . __( 'Required', 'my-calendar' ) . '&lt;/span>' : '';
+		switch ( $field['input_type'] ) {
+			case 'text':
+			case 'number':
+			case 'email':
+			case 'url':
+			case 'date':
+			case 'tel':
+				$output = "&lt;input type='" . $field['input_type'] . "' name='$name' id='$name' value='$user_value'$required />";
+				break;
+			case 'hidden':
+				$output = "&lt;input type='hidden' name='$name' value='$user_value' />";
+				break;
+			case 'textarea':
+				$output = "&lt;textarea rows='6' cols='60' name='$name' id='$name'$required>$user_value&lt;/textarea>";
+				break;
+			case 'select':
+				if ( isset( $field['input_values'] ) ) {
+					$output = "&lt;select name='$name' id='$name'$required>";
+					foreach ( $field['input_values'] as $value ) {
+						$value = stripslashes( $value );
+						if ( $value === $user_value ) {
+							$selected = " selected='selected'";
+						} else {
+							$selected = '';
+						}
+						$output .= "&lt;option value='" . esc_attr( stripslashes( $value ) ) . "'$selected>" . esc_html( stripslashes( $value ) ) . "&lt;/option>\n";
+					}
+					$output .= '&lt;/select>';
+				}
+				break;
+			case 'checkbox':
+			case 'radio':
+				if ( isset( $field['input_values'] ) ) {
+					$value = $field['input_values'];
+					if ( (string) $value === (string) $user_value ) {
+						$checked = ' checked="checked"';
+					} else {
+						$checked = '';
+					}
+					$output = "&lt;input type='" . $field['input_type'] . "' name='$name' id='$name' value='" . esc_attr( stripslashes( $value ) ) . "'$checked $required />";
+				}
+				break;
+			default:
+				$output = "&lt;input type='text' name='$name' id='$name' value='$user_value' $required />";
+		}
+		if ( 'hidden' !== $field['input_type'] ) {
+			$return .= ( 'checkbox' === $field['input_type'] || 'radio' === $field['input_type'] ) ? '&lt;p class="' . $field['input_type'] . '">' . $output . " &lt;label for='$name'>" . $field['title'] . $req_label . '&lt;/label>&lt;/p>' : "&lt;p>&lt;label for='$name'>" . $field['title'] . $req_label . '&lt;/label> ' . $output . '&lt;/p>';
+		} else {
+			$return .= $output;
+		}
+	}
+
+	return $return;
+}
+
+/**
+ * Array of location access features
+ *
+ * @return array
+ */
+function mc_location_access() {
+	$location_access = array(
+		'1'  => __( 'Accessible Entrance', 'my-calendar' ),
+		'2'  => __( 'Accessible Parking Designated', 'my-calendar' ),
+		'3'  => __( 'Accessible Restrooms', 'my-calendar' ),
+		'4'  => __( 'Accessible Seating', 'my-calendar' ),
+		'5'  => __( 'Accessible Transportation Available', 'my-calendar' ),
+		'6'  => __( 'Wheelchair Accessible', 'my-calendar' ),
+		'7'  => __( 'Courtesy Wheelchairs', 'my-calendar' ),
+		'8'  => __( 'Bariatric Seating Available', 'my-calendar' ),
+		'9'  => __( 'Elevator to all public areas', 'my-calendar' ),
+		'10' => __( 'Braille Signage', 'my-calendar' ),
+		'11' => __( 'Fragrance-Free Policy', 'my-calendar' ),
+		'12' => __( 'Other', 'my-calendar' ),
+	);
+
+	/**
+	 * Filter choices available for location accessibility services.
+	 *
+	 * @hook mc_location_access_choices
+	 *
+	 * @param {array} Array of location choices (numeric keys, string values.)
+	 *
+	 * @return {array}
+	 */
+	return apply_filters( 'mc_location_access_choices', $location_access );
+}
+
+/**
+ * Get a specific field with an location ID
+ *
+ * @param string $field Specific field to get.
+ * @param int    $id Location ID.
+ *
+ * @return mixed value
+ */
+function mc_location_data( $field, $id ) {
+	if ( $id ) {
+		$mcdb   = mc_is_remote_db();
+		$sql    = $mcdb->prepare( "SELECT $field FROM " . my_calendar_locations_table() . ' WHERE location_id = %d', $id );
+		$result = $mcdb->get_var( $sql );
+
+		return $result;
+	}
+}
+
+
+/**
+ * Get options list of locations to choose from
+ *
+ * @param object|false $location Selected location object or false if nothing selected.
+ *
+ * @return string set of option elements
+ */
+function mc_location_select( $location = false ) {
+	// Grab all locations and list them.
+	$list = '';
+	$locs = mc_get_locations( 'select-locations' );
+
+	foreach ( $locs as $loc ) {
+		// If label is empty, display street.
+		if ( '' === (string) $loc->location_label ) {
+			$label = $loc->location_street;
+		} else {
+			$label = $loc->location_label;
+		}
+		// If neither label nor street, skip.
+		if ( '' === (string) $label ) {
+			continue;
+		}
+		$l = '&lt;option value="' . $loc->location_id . '"';
+		if ( $location ) {
+			if ( (int) $location === (int) $loc->location_id ) {
+				$l .= ' selected="selected"';
+			}
+		}
+		$l    .= '>' . mc_kses_post( stripslashes( $label ) ) . '&lt;/option>';
+		$list .= $l;
+	}
+
+	return '&lt;option value="">' . __( 'Select', 'my-calendar' ) . '&lt;/option>' . $list;
+}
+
+/**
+ * Get list of locations (IDs and labels)
+ *
+ * @param string|array $args array of relevant arguments. If string, get all locations and set context.
+ *
+ * @return array locations (IDs and labels only)
+ */
+function mc_get_locations( $args ) {
+	global $wpdb;
+	if ( is_array( $args ) ) {
+		$context = ( isset( $args['context'] ) ) ? $args['context'] : 'general';
+		$orderby = ( isset( $args['orderby'] ) ) ? $args['orderby'] : 'location_label';
+		$order   = ( isset( $args['order'] ) ) ? $args['order'] : 'ASC';
+		$where   = ( isset( $args['where'] ) ) ? $args['where'] : '1';
+		$is      = ( isset( $args['is'] ) ) ? $args['is'] : '1';
+	} else {
+		$context = $args;
+		$orderby = 'location_label';
+		$order   = 'ASC';
+		$where   = '1';
+		$is      = '1';
+	}
+	if ( ! ( 'ASC' === $order || 'DESC' === $order ) ) {
+		// Prevent invalid order parameters.
+		$order = 'ASC';
+	}
+	$valid_args = $wpdb->get_col( 'DESC ' . my_calendar_locations_table() ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+	if ( ! ( in_array( $orderby, $valid_args, true ) ) ) {
+		// Prevent invalid order columns.
+		$orderby = 'location_label';
+	}
+	$results = $wpdb->get_results( $wpdb->prepare( 'SELECT location_id,location_label,location_street FROM ' . my_calendar_locations_table() . ' WHERE ' . esc_sql( $where ) . ' = %s ORDER BY ' . esc_sql( $orderby ) . ' ' . esc_sql( $order ), $is ) ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+
+	/**
+	 * Filter returned results when searching locations.
+	 *
+	 * @hook mc_filter_location_results
+	 *
+	 * @param {array} $results Array of IDs or objects.
+	 * @param {array} $args Query arguments.
+	 *
+	 * @return {array}
+	 */
+	return apply_filters( 'mc_filter_location_results', $results, $args );
+}
+
+/**
+ * Search location titles.
+ *
+ * @param string $query Location query.
+ *
+ * @return array locations
+ */
+function mc_core_search_locations( $query = '' ) {
+	global $wpdb;
+	$search  = '';
+	$results = array();
+	$current = empty( $_GET['paged'] ) ? 1 : intval( $_GET['paged'] );
+	$db_type = mc_get_db_type();
+	$query   = esc_sql( $query );
+	$length  = strlen( $query );
+
+	if ( '' !== $query ) {
+		// Fulltext is supported in InnoDB since MySQL 5.6; minimum required by WP is 5.0 as of WP 5.5.
+		// 37% of installs still below 5.6 as of 11/30/2020.
+		// 2.4% of installs below 5.6 as of 7/14/2022.
+		if ( 'MyISAM' === $db_type &amp;&amp; $length > 3 ) {
+			/**
+			 * Filter the fields used to handle MATCH queries in location searches on MyISAM dbs.
+			 *
+			 * @hook mc_search_fields
+			 *
+			 * @param {string} $fields Table columns in locations table.
+			 *
+			 * @return {string}
+			 */
+			$search = ' WHERE MATCH(' . apply_filters( 'mc_search_fields', 'location_label' ) . ") AGAINST ( '$query' IN BOOLEAN MODE ) ";
+		} else {
+			$search = " WHERE location_label LIKE '%$query%' ";
+		}
+	} else {
+		$search = '';
+	}
+
+	$locations = $wpdb->get_results( 'SELECT SQL_CALC_FOUND_ROWS location_id, location_label FROM ' . my_calendar_locations_table() . " $search ORDER BY location_label ASC" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared,WordPress.DB.PreparedSQL.NotPrepared
+
+	return $locations;
+}
+
+/**
+ * Filter theme content to display My Calendar location data.
+ *
+ * @param string $content Post content.
+ *
+ * @return string
+ */
+function mc_display_location_details( $content ) {
+	if ( is_singular( 'mc-locations' ) &amp;&amp; in_the_loop() &amp;&amp; is_main_query() ) {
+		$location = mc_get_location_id( get_the_ID() );
+		$location = mc_get_location( $location );
+		if ( ! is_object( $location ) ) {
+			return $content;
+		}
+		$args = array(
+			'ltype'    => 'name',
+			'lvalue'   => $location->location_label,
+			'type'     => 'events',
+			'after'    => 5,
+			'before'   => 0,
+			'fallback' => __( 'No events currently scheduled at this location.', 'my-calendar' ),
+		);
+		/**
+		 * Filter the arguments used to generate upcoming events for a location. Default ['ltype' => 'name', 'lvalue' => {location_label}, 'type' => 'events', 'after' => 5, 'before' => 0, 'fallback' => 'No events currently scheduled at this location.'].
+		 *
+		 * @hook mc_display_location_events
+		 *
+		 * @param {array}  $args Array of upcoming events arguments.
+		 * @param {object} $location Location object.
+		 *
+		 * @return {array}
+		 */
+		$args    = apply_filters( 'mc_display_location_events', $args, $location );
+		$events  = my_calendar_upcoming_events( $args );
+		$data    = array(
+			'location' => $location,
+			'events'   => $events,
+		);
+		$details = mc_load_template( 'location/single', $data );
+		if ( $details ) {
+			$content = $details;
+		} else {
+			$content = '
+&lt;div class="mc-view-location">
+	&lt;div class="mc-location-content">' . $content . '&lt;/div>
+	&lt;div class="mc-location-gmap">' . mc_generate_map( $location, 'location' ) . '&lt;/div>
+	&lt;div class="mc-location-hcard">' . mc_hcard( $location, 'true', 'true', 'location' ) . '&lt;/div>
+	&lt;div class="mc-location-upcoming">&lt;h2>' . __( 'Upcoming Events', 'my-calendar' ) . '&lt;/h2>' . $events . '&lt;/div>
+&lt;/div>';
+			/**
+			 * Filter the HTML output for single location details.
+			 *
+			 * @hook mc_location_output
+			 *
+			 * @param {string} $content Full HTML output.
+			 * @param {object} $location Calendar location object.
+			 *
+			 * @return {string}
+			 */
+			$content = apply_filters( 'mc_location_output', $content, $location );
+		}
+	}
+
+	return $content;
+}
+add_filter( 'the_content', 'mc_display_location_details' );
+</code></pre>
+        </article>
+    </section>
+
+
+
+
+	</main>
+    <footer>
+		<a href="https://docs.joedolson.com/my-calendar">My Calendar User Documentation</a> &bull;
+		<a href="https://github.com/joedolson/my-calendar/">My Calendar on GitHub</a> &bull;
+		<a href="https://www.joedolson.com/my-calendar-pro/">Buy My Calendar Pro</a>
+	</footer>
+
+	
+</div>
+
+<nav>
+    <h2><a href="index.html">Home</a></h2><h3>Actions</h3><ul><li><a href="mc_after_help.html">mc_after_help</a></li><li><a href="mc_bulk_actions.html">mc_bulk_actions</a></li><li><a href="mc_clean_duplicate_locations.html">mc_clean_duplicate_locations</a></li><li><a href="mc_create_location_posts.html">mc_create_location_posts</a></li><li><a href="mc_debug.html">mc_debug</a></li><li><a href="mc_delete_event.html">mc_delete_event</a></li><li><a href="mc_delete_event_instance.html">mc_delete_event_instance</a></li><li><a href="mc_delete_location.html">mc_delete_location</a></li><li><a href="mc_delete_location_posts.html">mc_delete_location_posts</a></li><li><a href="mc_deleted_post.html">mc_deleted_post</a></li><li><a href="mc_event_expired.html">mc_event_expired</a></li><li><a href="mc_event_future.html">mc_event_future</a></li><li><a href="mc_event_happening.html">mc_event_happening</a></li><li><a href="mc_event_over.html">mc_event_over</a></li><li><a href="mc_hide_past_dates.html">mc_hide_past_dates</a></li><li><a href="mc_mass_delete_locations.html">mc_mass_delete_locations</a></li><li><a href="mc_mass_%257B$action%257D_events.html">mc_mass_{$action}_events</a></li><li><a href="mc_modify_location.html">mc_modify_location</a></li><li><a href="mc_notify_event_spam.html">mc_notify_event_spam</a></li><li><a href="mc_post_add_category.html">mc_post_add_category</a></li><li><a href="mc_post_category_form.html">mc_post_category_form</a></li><li><a href="mc_print_view_head.html">mc_print_view_head</a></li><li><a href="mc_save_event.html">mc_save_event</a></li><li><a href="mc_save_grouped_events.html">mc_save_grouped_events</a></li><li><a href="mc_save_location.html">mc_save_location</a></li><li><a href="mc_save_settings.html">mc_save_settings</a></li><li><a href="mc_save_user.html">mc_save_user</a></li><li><a href="mc_tags_created.html">mc_tags_created</a></li><li><a href="mc_transition_event.html">mc_transition_event</a></li><li><a href="mc_update_event_post.html">mc_update_event_post</a></li><li><a href="mc_update_location_posts.html">mc_update_location_posts</a></li><li><a href="mcs_complete_submission.html">mcs_complete_submission</a></li><li><a href="my_calendar_drawing_event.html">my_calendar_drawing_event</a></li><li><a href="my_calendar_event_drawn.html">my_calendar_event_drawn</a></li></ul><h3>Filters</h3><ul><li><a href="ical_x_published_ttl.html">ical_x_published_ttl</a></li><li><a href="mc_access_selector.html">mc_access_selector</a></li><li><a href="mc_add_events_url.html">mc_add_events_url</a></li><li><a href="mc_adminbar_uri.html">mc_adminbar_uri</a></li><li><a href="mc_advanced_search.html">mc_advanced_search</a></li><li><a href="mc_after_calendar.html">mc_after_calendar</a></li><li><a href="mc_after_event.html">mc_after_event</a></li><li><a href="mc_after_event_no_details.html">mc_after_event_no_details</a></li><li><a href="mc_after_settings.html">mc_after_settings</a></li><li><a href="mc_ajax_js.html">mc_ajax_js</a></li><li><a href="mc_all_list_dates.html">mc_all_list_dates</a></li><li><a href="mc_api_auto_date.html">mc_api_auto_date</a></li><li><a href="mc_api_can_edit_event.html">mc_api_can_edit_event</a></li><li><a href="mc_api_key.html">mc_api_key</a></li><li><a href="mc_autoclose_comments.html">mc_autoclose_comments</a></li><li><a href="mc_before_calendar.html">mc_before_calendar</a></li><li><a href="mc_before_event.html">mc_before_event</a></li><li><a href="mc_before_event_form.html">mc_before_event_form</a></li><li><a href="mc_before_event_no_details.html">mc_before_event_no_details</a></li><li><a href="mc_before_save_insert.html">mc_before_save_insert</a></li><li><a href="mc_before_save_update.html">mc_before_save_update</a></li><li><a href="mc_cached_pages_to_refresh.html">mc_cached_pages_to_refresh</a></li><li><a href="mc_calendar_attributes.html">mc_calendar_attributes</a></li><li><a href="mc_can_edit_event.html">mc_can_edit_event</a></li><li><a href="mc_capabilities.html">mc_capabilities</a></li><li><a href="mc_category_fields.html">mc_category_fields</a></li><li><a href="mc_category_icon.html">mc_category_icon</a></li><li><a href="mc_category_key.html">mc_category_key</a></li><li><a href="mc_category_list.html">mc_category_list</a></li><li><a href="mc_category_selector.html">mc_category_selector</a></li><li><a href="mc_close_button.html">mc_close_button</a></li><li><a href="mc_convert_locations_select_to_autocomplete.html">mc_convert_locations_select_to_autocomplete</a></li><li><a href="mc_custom_content_editor.html">mc_custom_content_editor</a></li><li><a href="mc_custom_dirs.html">mc_custom_dirs</a></li><li><a href="mc_custom_sidebar_panels.html">mc_custom_sidebar_panels</a></li><li><a href="mc_custom_spam_status.html">mc_custom_spam_status</a></li><li><a href="mc_custom_template.html">mc_custom_template</a></li><li><a href="mc_custom_user_select.html">mc_custom_user_select</a></li><li><a href="mc_customize_details_link.html">mc_customize_details_link</a></li><li><a href="mc_customize_email_headers.html">mc_customize_email_headers</a></li><li><a href="mc_date_format.html">mc_date_format</a></li><li><a href="mc_datepicker_html.html">mc_datepicker_html</a></li><li><a href="mc_datetime_inputs.html">mc_datetime_inputs</a></li><li><a href="mc_default_event_length.html">mc_default_event_length</a></li><li><a href="mc_default_image_size.html">mc_default_image_size</a></li><li><a href="mc_default_options.html">mc_default_options</a></li><li><a href="mc_default_output_order.html">mc_default_output_order</a></li><li><a href="mc_details_grid_link.html">mc_details_grid_link</a></li><li><a href="mc_details_template.html">mc_details_template</a></li><li><a href="mc_disable_link.html">mc_disable_link</a></li><li><a href="mc_disable_mobile_js.html">mc_disable_mobile_js</a></li><li><a href="mc_disable_spam_checking.html">mc_disable_spam_checking</a></li><li><a href="mc_display_author.html">mc_display_author</a></li><li><a href="mc_display_css_on_archives.html">mc_display_css_on_archives</a></li><li><a href="mc_display_format.html">mc_display_format</a></li><li><a href="mc_display_host.html">mc_display_host</a></li><li><a href="mc_display_location_events.html">mc_display_location_events</a></li><li><a href="mc_draw_todays_event.html">mc_draw_todays_event</a></li><li><a href="mc_draw_upcoming_event.html">mc_draw_upcoming_event</a></li><li><a href="mc_event_access_choices.html">mc_event_access_choices</a></li><li><a href="mc_event_access_fields.html">mc_event_access_fields</a></li><li><a href="mc_event_category_slug.html">mc_event_category_slug</a></li><li><a href="mc_event_classes.html">mc_event_classes</a></li><li><a href="mc_event_content.html">mc_event_content</a></li><li><a href="mc_event_controls.html">mc_event_controls</a></li><li><a href="mc_event_detail_%257Bname%257D.html">mc_event_detail_{name}</a></li><li><a href="mc_event_details.html">mc_event_details</a></li><li><a href="mc_event_exclude_from_search.html">mc_event_exclude_from_search</a></li><li><a href="mc_event_expired_link.html">mc_event_expired_link</a></li><li><a href="mc_event_has_alarm.html">mc_event_has_alarm</a></li><li><a href="mc_event_image_alt.html">mc_event_image_alt</a></li><li><a href="mc_event_mail_bcc.html">mc_event_mail_bcc</a></li><li><a href="mc_event_mail_body.html">mc_event_mail_body</a></li><li><a href="mc_event_mail_from.html">mc_event_mail_from</a></li><li><a href="mc_event_mail_subject.html">mc_event_mail_subject</a></li><li><a href="mc_event_mail_to.html">mc_event_mail_to</a></li><li><a href="mc_event_notices.html">mc_event_notices</a></li><li><a href="mc_event_object.html">mc_event_object</a></li><li><a href="mc_event_post_content.html">mc_event_post_content</a></li><li><a href="mc_event_recur_string.html">mc_event_recur_string</a></li><li><a href="mc_event_registration.html">mc_event_registration</a></li><li><a href="mc_event_registration_form.html">mc_event_registration_form</a></li><li><a href="mc_event_saved_message.html">mc_event_saved_message</a></li><li><a href="mc_event_schema.html">mc_event_schema</a></li><li><a href="mc_event_slug.html">mc_event_slug</a></li><li><a href="mc_event_statuses.html">mc_event_statuses</a></li><li><a href="mc_event_title.html">mc_event_title</a></li><li><a href="mc_event_today.html">mc_event_today</a></li><li><a href="mc_event_upcoming.html">mc_event_upcoming</a></li><li><a href="mc_event_upcoming_after.html">mc_event_upcoming_after</a></li><li><a href="mc_event_upcoming_before.html">mc_event_upcoming_before</a></li><li><a href="mc_excerpt_length.html">mc_excerpt_length</a></li><li><a href="mc_expand.html">mc_expand</a></li><li><a href="mc_fields_required.html">mc_fields_required</a></li><li><a href="mc_file_exists.html">mc_file_exists</a></li><li><a href="mc_filter_admin_grid_args.html">mc_filter_admin_grid_args</a></li><li><a href="mc_filter_api_args.html">mc_filter_api_args</a></li><li><a href="mc_filter_day.html">mc_filter_day</a></li><li><a href="mc_filter_events.html">mc_filter_events</a></li><li><a href="mc_filter_ical_template.html">mc_filter_ical_template</a></li><li><a href="mc_filter_image_data.html">mc_filter_image_data</a></li><li><a href="mc_filter_location_list.html">mc_filter_location_list</a></li><li><a href="mc_filter_location_results.html">mc_filter_location_results</a></li><li><a href="mc_filter_month.html">mc_filter_month</a></li><li><a href="mc_filter_offset.html">mc_filter_offset</a></li><li><a href="mc_filter_shortcodes.html">mc_filter_shortcodes</a></li><li><a href="mc_filter_year.html">mc_filter_year</a></li><li><a href="mc_footer_navigation.html">mc_footer_navigation</a></li><li><a href="mc_format_toggle_html.html">mc_format_toggle_html</a></li><li><a href="mc_from_date.html">mc_from_date</a></li><li><a href="mc_future_search_results.html">mc_future_search_results</a></li><li><a href="mc_gcal_description.html">mc_gcal_description</a></li><li><a href="mc_gcal_location.html">mc_gcal_location</a></li><li><a href="mc_generator_tab_content.html">mc_generator_tab_content</a></li><li><a href="mc_generator_tabs.html">mc_generator_tabs</a></li><li><a href="mc_get_current_url.html">mc_get_current_url</a></li><li><a href="mc_get_events_sites.html">mc_get_events_sites</a></li><li><a href="mc_get_file.html">mc_get_file</a></li><li><a href="mc_get_uri.html">mc_get_uri</a></li><li><a href="mc_get_week_days.html">mc_get_week_days</a></li><li><a href="mc_gmap_html.html">mc_gmap_html</a></li><li><a href="mc_grid_date.html">mc_grid_date</a></li><li><a href="mc_grid_day_wrapper.html">mc_grid_day_wrapper</a></li><li><a href="mc_grid_header_wrapper.html">mc_grid_header_wrapper</a></li><li><a href="mc_grid_js.html">mc_grid_js</a></li><li><a href="mc_grid_week_wrapper.html">mc_grid_week_wrapper</a></li><li><a href="mc_grid_wrapper.html">mc_grid_wrapper</a></li><li><a href="mc_grouped_events.html">mc_grouped_events</a></li><li><a href="mc_groups_pre_checkdata.html">mc_groups_pre_checkdata</a></li><li><a href="mc_happening_next_template.html">mc_happening_next_template</a></li><li><a href="mc_has_feeds.html">mc_has_feeds</a></li><li><a href="mc_hcard.html">mc_hcard</a></li><li><a href="mc_header_navigation.html">mc_header_navigation</a></li><li><a href="mc_heading.html">mc_heading</a></li><li><a href="mc_heading_inner_title.html">mc_heading_inner_title</a></li><li><a href="mc_heading_level.html">mc_heading_level</a></li><li><a href="mc_heading_level_list.html">mc_heading_level_list</a></li><li><a href="mc_heading_level_table.html">mc_heading_level_table</a></li><li><a href="mc_hide_nextmonth.html">mc_hide_nextmonth</a></li><li><a href="mc_ical_attributes.html">mc_ical_attributes</a></li><li><a href="mc_ical_download_from.html">mc_ical_download_from</a></li><li><a href="mc_ical_download_to.html">mc_ical_download_to</a></li><li><a href="mc_include_today_in_total.html">mc_include_today_in_total</a></li><li><a href="mc_insert_author_data.html">mc_insert_author_data</a></li><li><a href="mc_insert_custom_fields.html">mc_insert_custom_fields</a></li><li><a href="mc_insert_recurring.html">mc_insert_recurring</a></li><li><a href="mc_instance_data.html">mc_instance_data</a></li><li><a href="mc_instance_format.html">mc_instance_format</a></li><li><a href="mc_jumpbox.html">mc_jumpbox</a></li><li><a href="mc_jumpbox_future_years.html">mc_jumpbox_future_years</a></li><li><a href="mc_legacy_templates_enabled.html">mc_legacy_templates_enabled</a></li><li><a href="mc_list_event_title_hint.html">mc_list_event_title_hint</a></li><li><a href="mc_list_js.html">mc_list_js</a></li><li><a href="mc_list_titles_separator.html">mc_list_titles_separator</a></li><li><a href="mc_location_access_choices.html">mc_location_access_choices</a></li><li><a href="mc_location_container_primary.html">mc_location_container_primary</a></li><li><a href="mc_location_container_secondary.html">mc_location_container_secondary</a></li><li><a href="mc_location_events_link.html">mc_location_events_link</a></li><li><a href="mc_location_exclude_from_search.html">mc_location_exclude_from_search</a></li><li><a href="mc_location_fields.html">mc_location_fields</a></li><li><a href="mc_location_limit_sql.html">mc_location_limit_sql</a></li><li><a href="mc_location_list.html">mc_location_list</a></li><li><a href="mc_location_manager_cells.html">mc_location_manager_cells</a></li><li><a href="mc_location_manager_headers.html">mc_location_manager_headers</a></li><li><a href="mc_location_output.html">mc_location_output</a></li><li><a href="mc_location_schema.html">mc_location_schema</a></li><li><a href="mc_location_selector.html">mc_location_selector</a></li><li><a href="mc_map_height.html">mc_map_height</a></li><li><a href="mc_map_html.html">mc_map_html</a></li><li><a href="mc_map_icon.html">mc_map_icon</a></li><li><a href="mc_map_label.html">mc_map_label</a></li><li><a href="mc_map_url.html">mc_map_url</a></li><li><a href="mc_map_width.html">mc_map_width</a></li><li><a href="mc_mini_js.html">mc_mini_js</a></li><li><a href="mc_month_format.html">mc_month_format</a></li><li><a href="mc_month_year_format.html">mc_month_year_format</a></li><li><a href="mc_next_link.html">mc_next_link</a></li><li><a href="mc_notime_label.html">mc_notime_label</a></li><li><a href="mc_order_location_fields.html">mc_order_location_fields</a></li><li><a href="mc_override_category_icon.html">mc_override_category_icon</a></li><li><a href="mc_override_featured_image.html">mc_override_featured_image</a></li><li><a href="mc_past_search_results.html">mc_past_search_results</a></li><li><a href="mc_phone_format.html">mc_phone_format</a></li><li><a href="mc_post_template.html">mc_post_template</a></li><li><a href="mc_post_thumbnail_atts.html">mc_post_thumbnail_atts</a></li><li><a href="mc_pre_add_category.html">mc_pre_add_category</a></li><li><a href="mc_pre_checkdata.html">mc_pre_checkdata</a></li><li><a href="mc_prev_link.html">mc_prev_link</a></li><li><a href="mc_primary_sort.html">mc_primary_sort</a></li><li><a href="mc_print_return_url.html">mc_print_return_url</a></li><li><a href="mc_private_categories.html">mc_private_categories</a></li><li><a href="mc_private_event.html">mc_private_event</a></li><li><a href="mc_process_shortcodes.html">mc_process_shortcodes</a></li><li><a href="mc_registered_stylesheet.html">mc_registered_stylesheet</a></li><li><a href="mc_registration_state.html">mc_registration_state</a></li><li><a href="mc_related_event_limit.html">mc_related_event_limit</a></li><li><a href="mc_related_template.html">mc_related_template</a></li><li><a href="mc_return_to_calendar.html">mc_return_to_calendar</a></li><li><a href="mc_return_uri.html">mc_return_uri</a></li><li><a href="mc_rss_feed_date_range.html">mc_rss_feed_date_range</a></li><li><a href="mc_search_after.html">mc_search_after</a></li><li><a href="mc_search_attributes.html">mc_search_attributes</a></li><li><a href="mc_search_before.html">mc_search_before</a></li><li><a href="mc_search_exportlinks.html">mc_search_exportlinks</a></li><li><a href="mc_search_fields.html">mc_search_fields</a></li><li><a href="mc_search_no_results.html">mc_search_no_results</a></li><li><a href="mc_search_page.html">mc_search_page</a></li><li><a href="mc_search_template.html">mc_search_template</a></li><li><a href="mc_searched_events.html">mc_searched_events</a></li><li><a href="mc_secondary_sort.html">mc_secondary_sort</a></li><li><a href="mc_send_notification.html">mc_send_notification</a></li><li><a href="mc_set_primary_category.html">mc_set_primary_category</a></li><li><a href="mc_settings_section_links.html">mc_settings_section_links</a></li><li><a href="mc_setup_allowed_sites.html">mc_setup_allowed_sites</a></li><li><a href="mc_shortcode_generator.html">mc_shortcode_generator</a></li><li><a href="mc_show_block.html">mc_show_block</a></li><li><a href="mc_show_custom_posts_in_menu.html">mc_show_custom_posts_in_menu</a></li><li><a href="mc_show_months.html">mc_show_months</a></li><li><a href="mc_show_week_number.html">mc_show_week_number</a></li><li><a href="mc_single_event_shortcode.html">mc_single_event_shortcode</a></li><li><a href="mc_single_event_title.html">mc_single_event_title</a></li><li><a href="mc_single_ical_template.html">mc_single_ical_template</a></li><li><a href="mc_subheading_level.html">mc_subheading_level</a></li><li><a href="mc_template.html">mc_template</a></li><li><a href="mc_text_all_categories.html">mc_text_all_categories</a></li><li><a href="mc_time_max.html">mc_time_max</a></li><li><a href="mc_time_min.html">mc_time_min</a></li><li><a href="mc_time_toggle_html.html">mc_time_toggle_html</a></li><li><a href="mc_titles_format.html">mc_titles_format</a></li><li><a href="mc_to_date.html">mc_to_date</a></li><li><a href="mc_today_attributes.html">mc_today_attributes</a></li><li><a href="mc_today_link.html">mc_today_link</a></li><li><a href="mc_todays_events_after.html">mc_todays_events_after</a></li><li><a href="mc_todays_events_before.html">mc_todays_events_before</a></li><li><a href="mc_todays_events_header.html">mc_todays_events_header</a></li><li><a href="mc_upcoming_attributes.html">mc_upcoming_attributes</a></li><li><a href="mc_upcoming_date_from.html">mc_upcoming_date_from</a></li><li><a href="mc_upcoming_date_to.html">mc_upcoming_date_to</a></li><li><a href="mc_upcoming_events_footer.html">mc_upcoming_events_footer</a></li><li><a href="mc_upcoming_events_header.html">mc_upcoming_events_header</a></li><li><a href="mc_upcoming_events_template.html">mc_upcoming_events_template</a></li><li><a href="mc_update_group_data.html">mc_update_group_data</a></li><li><a href="mc_use_avatars.html">mc_use_avatars</a></li><li><a href="mc_use_custom_template.html">mc_use_custom_template</a></li><li><a href="mc_use_permalinks.html">mc_use_permalinks</a></li><li><a href="mc_user_can_see_private_events.html">mc_user_can_see_private_events</a></li><li><a href="mc_user_fields.html">mc_user_fields</a></li><li><a href="mc_user_permissions.html">mc_user_permissions</a></li><li><a href="mc_venue_accessibility.html">mc_venue_accessibility</a></li><li><a href="mc_widget_defaults.html">mc_widget_defaults</a></li><li><a href="mcs_check_conflicts.html">mcs_check_conflicts</a></li><li><a href="mcs_submission_permissions.html">mcs_submission_permissions</a></li><li><a href="mcs_time_block.html">mcs_time_block</a></li><li><a href="mcs_view_admin_links_on_frontend.html">mcs_view_admin_links_on_frontend</a></li><li><a href="my_calendar_body.html">my_calendar_body</a></li><li><a href="my_calendar_events_args.html">my_calendar_events_args</a></li></ul>
+</nav>
+
+<br class="clear">
+
+<script> prettyPrint(); </script>
+<script src="scripts/linenumber.js"> </script>
+</body>
+</html>
